@@ -6,29 +6,22 @@ export default function useSpeechSynthesis() {
   const keepAliveRef = useRef(null);
 
   const speak = useCallback((text, onEnd) => {
-    // Cancel any ongoing speech
-    window.speechSynthesis.cancel();
+    const synth = window.speechSynthesis;
+
+    // Cancel any ongoing speech first
+    synth.cancel();
     clearInterval(keepAliveRef.current);
 
-    if (!text || !window.speechSynthesis) {
+    if (!text || !synth) {
       onEnd?.();
       return;
     }
 
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.05;
+    utterance.lang = 'en-US';
+    utterance.rate = 0.9;   // slightly slower — easier to understand
     utterance.pitch = 1.0;
     utterance.volume = 1.0;
-    utterance.lang = 'en-US';
-
-    // Pick the best available English voice
-    const voices = window.speechSynthesis.getVoices();
-    const preferred =
-      voices.find(v => v.name.includes('Google US English')) ||
-      voices.find(v => v.name.includes('Samantha')) ||
-      voices.find(v => v.lang === 'en-US' && !v.localService) ||
-      voices.find(v => v.lang.startsWith('en'));
-    if (preferred) utterance.voice = preferred;
 
     onEndRef.current = onEnd;
 
@@ -44,21 +37,58 @@ export default function useSpeechSynthesis() {
 
     utterance.onend = handleDone;
     utterance.onerror = (e) => {
-      console.warn('TTS error:', e.error);
-      handleDone();
+      console.error('SpeechSynthesis error:', e);
+      handleDone(); // still trigger callback so interview does not get stuck
     };
 
-    window.speechSynthesis.speak(utterance);
+    // Fix Bug 2: Chrome pauses TTS after ~15s — keep it alive with pause/resume
+    const startKeepAlive = () => {
+      keepAliveRef.current = setInterval(() => {
+        if (!synth.speaking) {
+          clearInterval(keepAliveRef.current);
+          return;
+        }
+        synth.pause();
+        synth.resume();
+      }, 10000);
+    };
 
-    // Chrome bug workaround: speechSynthesis pauses after ~15s for long text
-    keepAliveRef.current = setInterval(() => {
-      if (window.speechSynthesis.speaking) {
-        window.speechSynthesis.pause();
-        window.speechSynthesis.resume();
-      } else {
-        clearInterval(keepAliveRef.current);
+    // Fix Bug 1: Wait for voices to be loaded before speaking
+    const doSpeak = () => {
+      const voices = synth.getVoices();
+      if (voices.length > 0) {
+        // Prefer a natural English voice if available
+        const preferredVoice =
+          voices.find(v => v.lang === 'en-US' && v.name.includes('Natural')) ||
+          voices.find(v => v.name.includes('Google US English')) ||
+          voices.find(v => v.name.includes('Samantha')) ||
+          voices.find(v => v.lang === 'en-US' && !v.localService) ||
+          voices.find(v => v.lang === 'en-US') ||
+          voices.find(v => v.lang.startsWith('en')) ||
+          voices[0];
+
+        if (preferredVoice) utterance.voice = preferredVoice;
+        synth.speak(utterance);
+        startKeepAlive();
       }
-    }, 10000);
+    };
+
+    if (synth.getVoices().length > 0) {
+      doSpeak();
+    } else {
+      // Voices not loaded yet — wait for the onvoiceschanged event
+      synth.onvoiceschanged = () => {
+        synth.onvoiceschanged = null; // remove listener after first call
+        doSpeak();
+      };
+      // Fallback: if onvoiceschanged never fires (some browsers), try after a delay
+      setTimeout(() => {
+        if (synth.getVoices().length > 0 && !synth.speaking) {
+          synth.onvoiceschanged = null;
+          doSpeak();
+        }
+      }, 500);
+    }
   }, []);
 
   const cancel = useCallback(() => {

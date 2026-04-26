@@ -21,6 +21,7 @@ export default function Interview({ candidate }) {
   const {
     liveTranscript, submittableTranscript, isListening,
     error: micError, isSupported, confidence,
+    finalTranscriptRef, isRecordingRef,
     startListening, stopListening, resetTranscript
   } = useSpeechRecognition();
 
@@ -56,11 +57,12 @@ export default function Interview({ candidate }) {
   const handleCountdownDone = useCallback(() => {
     setState(STATES.RECORDING);
     resetTranscript();
+    finalTranscriptRef.current = '';
     startListening();
     lastSpeechRef.current = Date.now();
     setSilenceDetected(false);
     setAutoSubmitCount(5);
-  }, [setState, resetTranscript, startListening]);
+  }, [setState, resetTranscript, startListening, finalTranscriptRef]);
 
   const { count, isRunning: countdownRunning, start: startCountdown, skip: skipCountdown } =
     useCountdown(5, handleCountdownDone);
@@ -287,9 +289,82 @@ export default function Interview({ candidate }) {
     return () => clearInterval(timeLimitAutoSubmitTimerRef.current);
   }, [isTimeLimitAutoSubmitting, state]);
 
+  // ── Process transcript and decide whether to submit or show review ──
+  const handleSubmitTranscript = useCallback((overrideTranscript = null) => {
+    const textOverride = typeof overrideTranscript === 'string' ? overrideTranscript : null;
+    const transcript = textOverride !== null ? textOverride : finalTranscriptRef.current;
+    const text = transcript.trim();
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
+
+    // FIX 2: Deduplication safety net
+    if (textOverride === null) {
+      const words = text.split(/\s+/).filter(Boolean);
+      const chunks = [];
+      for (let i = 0; i < words.length; i += 20) {
+        chunks.push(words.slice(i, i + 20).join(' '));
+      }
+
+      let isMalformed = false;
+      let consecutiveCount = 1;
+      for (let i = 1; i < chunks.length; i++) {
+        if (chunks[i] === chunks[i - 1]) {
+          consecutiveCount++;
+        } else {
+          consecutiveCount = 1;
+        }
+        if (consecutiveCount > 2) {
+          isMalformed = true;
+          break;
+        }
+      }
+
+      if (isMalformed) {
+        setReviewState('MALFORMED');
+        setState(STATES.COUNTDOWN);
+        return;
+      }
+    }
+
+    // Empty / too short (< 5 words)
+    if (wordCount < 5 || text.length < 5) {
+      setReviewState('EMPTY');
+      setState(STATES.COUNTDOWN);
+      return;
+    }
+
+    // If user overrides, skip review
+    if (textOverride !== null) {
+      setReviewState(null);
+      sendAnswer(text);
+      resetTranscript();
+      return;
+    }
+
+    // EC3 — Low confidence (< 0.5)
+    if (confidence < 0.5) {
+      setEditableTranscript(text);
+      setReviewState('LOW_CONFIDENCE');
+      setState(STATES.COUNTDOWN);
+      return;
+    }
+
+    // EC1 — Short answer (< 10 words or < 10 chars)
+    if (wordCount < 10 || text.length < 10) {
+      setEditableTranscript(text);
+      setReviewState('SHORT');
+      setState(STATES.COUNTDOWN);
+      return;
+    }
+
+    // If all good, send
+    setReviewState(null);
+    sendAnswer(text);
+    resetTranscript();
+  }, [setState, sendAnswer, resetTranscript, confidence, finalTranscriptRef]);
+
   // ── Submit answer (manual or auto) ──
   const submitAnswer = useCallback((overrideTranscript = null) => {
-    stopListening();
+    // Clear all timers
     clearInterval(silenceCheckRef.current);
     clearInterval(autoSubmitTimerRef.current);
     clearInterval(recordingTimerRef.current);
@@ -297,78 +372,17 @@ export default function Interview({ candidate }) {
     setSilenceDetected(false);
     setIsTimeLimitAutoSubmitting(false);
 
-    setTimeout(() => {
-      const textOverride = typeof overrideTranscript === 'string' ? overrideTranscript : null;
-      const finalTranscript = textOverride !== null ? textOverride : submittableTranscript;
-      const text = finalTranscript.trim();
-      const wordCount = text.split(/\s+/).filter(Boolean).length;
+    // If override transcript provided (from review states), submit directly
+    if (typeof overrideTranscript === 'string') {
+      handleSubmitTranscript(overrideTranscript);
+      return;
+    }
 
-      // FIX 2: Deduplication safety net
-      if (textOverride === null) {
-        const words = text.split(/\s+/).filter(Boolean);
-        const chunks = [];
-        for (let i = 0; i < words.length; i += 20) {
-          chunks.push(words.slice(i, i + 20).join(' '));
-        }
-        
-        let isMalformed = false;
-        let consecutiveCount = 1;
-        for (let i = 1; i < chunks.length; i++) {
-          if (chunks[i] === chunks[i - 1]) {
-            consecutiveCount++;
-          } else {
-            consecutiveCount = 1;
-          }
-          if (consecutiveCount > 2) {
-            isMalformed = true;
-            break;
-          }
-        }
-
-        if (isMalformed) {
-          setReviewState('MALFORMED');
-          setState(STATES.COUNTDOWN);
-          return;
-        }
-      }
-
-      // EC3 — Empty / too short (< 5 chars)
-      if (text.length < 5 || wordCount === 0) {
-        setReviewState('EMPTY');
-        setState(STATES.COUNTDOWN);
-        return;
-      }
-
-      // If user overrides or we're already submitting anyway, skip review
-      if (textOverride !== null) {
-        setReviewState(null);
-        sendAnswer(text);
-        resetTranscript();
-        return;
-      }
-
-      // EC3 — Low confidence (< 0.5)
-      if (confidence < 0.5) {
-        setEditableTranscript(text);
-        setReviewState('LOW_CONFIDENCE');
-        setState(STATES.COUNTDOWN);
-        return;
-      }
-
-      // EC1 — Short answer (< 10 words or < 10 chars)
-      if (wordCount < 10 || text.length < 10) {
-        setEditableTranscript(text);
-        setReviewState('SHORT');
-        setState(STATES.COUNTDOWN);
-        return;
-      }
-
-      // If all good, send
-      setReviewState(null);
-      sendAnswer(text);
-      resetTranscript();
-    }, 300);
-  }, [stopListening, submittableTranscript, liveTranscript, setState, sendAnswer, resetTranscript, confidence]);
+    // Stop recording — onend will fire and trigger handleSubmitTranscript via callback
+    stopListening(() => {
+      handleSubmitTranscript();
+    });
+  }, [stopListening, handleSubmitTranscript]);
 
   // Keep the ref always pointing to the latest submitAnswer
   submitAnswerRef.current = submitAnswer;

@@ -1,13 +1,25 @@
-import { useState, useMemo } from 'react';
+import { useState, useRef, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import useSpeechRecognition from '../hooks/useSpeechRecognition';
 
 export default function MicCheck() {
   const navigate = useNavigate();
-  const { liveTranscript, submittableTranscript, isListening, error, isSupported, startListening, stopListening, resetTranscript } = useSpeechRecognition();
-  const transcript = (submittableTranscript + ' ' + liveTranscript).trim();
+  const [transcript, setTranscript] = useState('');
+  const [isListening, setIsListening] = useState(false);
   const [hasTested, setHasTested] = useState(false);
   const [testPassed, setTestPassed] = useState(false);
+  const [error, setError] = useState(null);
+  const [isSupported, setIsSupported] = useState(true);
+
+  const recognitionRef = useRef(null);
+  const transcriptRef = useRef('');
+
+  // Check browser support on mount
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setIsSupported(false);
+    }
+  }, []);
 
   // Pull candidate's first name from localStorage
   const candidateFirstName = useMemo(() => {
@@ -20,20 +32,111 @@ export default function MicCheck() {
   }, []);
 
   const handleTest = () => {
-    resetTranscript();
+    setTranscript('');
     setHasTested(false);
     setTestPassed(false);
-    startListening();
-    // Auto-stop after 5 seconds
-    setTimeout(() => {
-      stopListening();
+    setError(null);
+    transcriptRef.current = '';
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    // Stop any previous instance
+    if (recognitionRef.current) {
+      try { recognitionRef.current.abort(); } catch {}
+      recognitionRef.current = null;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      setIsListening(true);
+    };
+
+    recognition.onresult = (event) => {
+      let interim = '';
+      let final = '';
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const text = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          final += text;
+        } else {
+          interim += text;
+        }
+      }
+
+      // Accumulate final transcript
+      if (final) {
+        transcriptRef.current += final;
+      }
+
+      // Show interim or final in UI immediately for live feedback
+      const display = transcriptRef.current + (interim ? interim : '');
+      setTranscript(display);
+    };
+
+    recognition.onerror = (event) => {
+      console.error('Mic check recognition error:', event.error);
+      if (event.error === 'not-allowed') {
+        setError('Please allow microphone access in your browser settings');
+      } else if (event.error === 'no-speech') {
+        setError('No speech detected. Please try again.');
+      } else if (event.error === 'network') {
+        setError('Network error. Please check your connection.');
+      } else {
+        setError('Something went wrong. Please try again.');
+      }
+      setIsListening(false);
       setHasTested(true);
-    }, 5000);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      setHasTested(true);
+
+      // Safety fallback: if we got any text at all, always show success
+      if (transcriptRef.current.trim().length > 0) {
+        setTestPassed(true);
+        setTranscript(transcriptRef.current);
+      }
+      // If transcript is still empty and no error was set, the "nothing detected" UI will show via isFail
+    };
+
+    recognitionRef.current = recognition;
+
+    try {
+      recognition.start();
+    } catch (e) {
+      console.warn('Recognition start failed:', e.message);
+      setError('Something went wrong. Please try again.');
+    }
+
+    // Safety: auto-stop after 6 seconds if still listening (gives API time to finish)
+    setTimeout(() => {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch {}
+      }
+    }, 6000);
   };
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch {}
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
+
   // Check if test passed after listening stops
-  const isSuccess = hasTested && transcript.trim().length > 0;
-  const isFail = hasTested && transcript.trim().length === 0;
+  const isSuccess = hasTested && (testPassed || transcript.trim().length > 0);
+  const isFail = hasTested && !isSuccess && !error;
 
   if (!isSupported) {
     return (
