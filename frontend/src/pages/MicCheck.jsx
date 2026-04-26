@@ -240,7 +240,7 @@ export default function MicCheck() {
 
         {/* Continue Button */}
         <button
-          onClick={() => navigate('/interview')}
+          onClick={() => navigate('/instructions')}
           disabled={!isSuccess}
           className={`mt-8 w-full py-3.5 rounded-xl font-semibold text-base transition-all duration-200 ${
             isSuccess

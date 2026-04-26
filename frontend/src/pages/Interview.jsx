@@ -37,15 +37,9 @@ export default function Interview({ candidate }) {
   const ttsSpokenFor = useRef(0);
   const [waitingForTTS, setWaitingForTTS] = useState(false);
 
-  // Silence detection state
-  const [silenceDetected, setSilenceDetected] = useState(false);
-  const [autoSubmitCount, setAutoSubmitCount] = useState(5);
-  const lastSpeechRef = useRef(Date.now());
-  const silenceCheckRef = useRef(null);
-  const autoSubmitTimerRef = useRef(null);
-  const previousTranscriptRef = useRef('');
   const submitAnswerRef = useRef(null);
   const [recordingSeconds, setRecordingSeconds] = useState(30);
+  const [autoSubmitCount, setAutoSubmitCount] = useState(3);
   const [isTimeLimitAutoSubmitting, setIsTimeLimitAutoSubmitting] = useState(false);
   const recordingTimerRef = useRef(null);
   const timeLimitAutoSubmitTimerRef = useRef(null);
@@ -58,12 +52,9 @@ export default function Interview({ candidate }) {
     setState(STATES.RECORDING);
     resetTranscript();
     finalTranscriptRef.current = '';
-    micSubmittingRef.current = false; // Reset submit gate for new recording
-    isRecordingRef.current = false; // Will be set true by startListening
+    micSubmittingRef.current = false;
+    isRecordingRef.current = false;
     startListening();
-    lastSpeechRef.current = Date.now();
-    setSilenceDetected(false);
-    setAutoSubmitCount(5);
   }, [setState, resetTranscript, startListening, finalTranscriptRef, micSubmittingRef, isRecordingRef]);
 
   const { count, isRunning: countdownRunning, start: startCountdown, skip: skipCountdown } =
@@ -116,8 +107,6 @@ export default function Interview({ candidate }) {
       if (timerRef.current) clearInterval(timerRef.current);
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
       if (timeLimitAutoSubmitTimerRef.current) clearInterval(timeLimitAutoSubmitTimerRef.current);
-      if (autoSubmitTimerRef.current) clearInterval(autoSubmitTimerRef.current);
-      if (silenceCheckRef.current) clearInterval(silenceCheckRef.current);
 
       // Speak the closing message aloud, then navigate
       if (currentAIText) {
@@ -144,26 +133,6 @@ export default function Interview({ candidate }) {
     };
   }, []);
 
-  // ── Track last speech timestamp for silence detection ──
-  useEffect(() => {
-    if (state === STATES.RECORDING) {
-      const combined = (submittableTranscript + ' ' + liveTranscript).trim();
-      if (combined && combined !== previousTranscriptRef.current) {
-        previousTranscriptRef.current = combined;
-        lastSpeechRef.current = Date.now();
-        // If candidate resumes speaking, cancel auto-submit
-        if (silenceDetected) {
-          setSilenceDetected(false);
-          setAutoSubmitCount(5);
-          if (autoSubmitTimerRef.current) {
-            clearInterval(autoSubmitTimerRef.current);
-            autoSubmitTimerRef.current = null;
-          }
-        }
-      }
-    }
-  }, [submittableTranscript, liveTranscript, state, silenceDetected]);
-
   // EC5 — Warn before unload mid-interview
   useEffect(() => {
     const handleBeforeUnload = (e) => {
@@ -175,75 +144,6 @@ export default function Interview({ candidate }) {
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [isComplete]);
-
-  // EC4 — 15s absolute silence timeout
-  useEffect(() => {
-    if (state === STATES.RECORDING && !submittableTranscript && !liveTranscript) {
-      const timer = setTimeout(() => {
-        stopListening();
-        setReviewState('SILENCE');
-        setState(STATES.COUNTDOWN); 
-        setSilenceDetected(false);
-      }, 15000);
-      return () => clearTimeout(timer);
-    }
-  }, [state, submittableTranscript, liveTranscript, stopListening, setState]);
-
-  // ── Silence check: every second during RECORDING ──
-  useEffect(() => {
-    if (state !== STATES.RECORDING) {
-      // Clean up when not recording
-      clearInterval(silenceCheckRef.current);
-      clearInterval(autoSubmitTimerRef.current);
-      silenceCheckRef.current = null;
-      autoSubmitTimerRef.current = null;
-      setSilenceDetected(false);
-      setAutoSubmitCount(5);
-      return;
-    }
-
-    silenceCheckRef.current = setInterval(() => {
-      const combined = (submittableTranscript + ' ' + liveTranscript).trim();
-      const wordCount = combined.split(/\s+/).filter(Boolean).length;
-      const silenceMs = Date.now() - lastSpeechRef.current;
-
-      // Only trigger after candidate has said at least 5 words AND 3s of silence
-      if (wordCount >= 5 && silenceMs > 3000 && !silenceDetected) {
-        setSilenceDetected(true);
-      }
-    }, 500);
-
-    return () => {
-      clearInterval(silenceCheckRef.current);
-      silenceCheckRef.current = null;
-    };
-  }, [state, submittableTranscript, liveTranscript, silenceDetected]);
-
-  // ── Auto-submit countdown once silence is detected ──
-  useEffect(() => {
-    if (!silenceDetected || state !== STATES.RECORDING) return;
-
-    setAutoSubmitCount(5);
-    autoSubmitTimerRef.current = setInterval(() => {
-      setAutoSubmitCount(prev => {
-        if (prev <= 1) {
-          clearInterval(autoSubmitTimerRef.current);
-          autoSubmitTimerRef.current = null;
-          // Auto-submit — use ref to get latest version
-          submitAnswerRef.current?.();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => {
-      if (autoSubmitTimerRef.current) {
-        clearInterval(autoSubmitTimerRef.current);
-        autoSubmitTimerRef.current = null;
-      }
-    };
-  }, [silenceDetected, state]);
 
   // FIX 1: Recording Timer (30 seconds max)
   useEffect(() => {
@@ -367,15 +267,10 @@ export default function Interview({ candidate }) {
   // ── Submit answer (manual or auto) ──
   const submitAnswer = useCallback((overrideTranscript = null) => {
     // Clear all timers immediately
-    clearInterval(silenceCheckRef.current);
-    clearInterval(autoSubmitTimerRef.current);
     clearInterval(recordingTimerRef.current);
     clearInterval(timeLimitAutoSubmitTimerRef.current);
-    silenceCheckRef.current = null;
-    autoSubmitTimerRef.current = null;
     recordingTimerRef.current = null;
     timeLimitAutoSubmitTimerRef.current = null;
-    setSilenceDetected(false);
     setIsTimeLimitAutoSubmitting(false);
 
     // If override transcript provided (from review states), submit directly
@@ -561,12 +456,7 @@ export default function Interview({ candidate }) {
                   <button onClick={() => { setReviewState(null); ttsSpokenFor.current = questionNumber - 1; startCountdown(); }} className="px-5 py-2 text-sm font-medium text-white bg-[#00B050] rounded-lg hover:bg-emerald-600">Re-record</button>
                 </>
               )}
-              {reviewState === 'SILENCE' && (
-                <>
-                  <p className="text-gray-600 text-sm mb-4 font-medium">We didn't hear anything. Take your time — click Record when you're ready.</p>
-                  <button onClick={() => { setReviewState(null); handleCountdownDone(); }} className="px-5 py-2 text-sm font-medium text-white bg-[#00B050] rounded-lg hover:bg-emerald-600">Start Recording</button>
-                </>
-              )}
+
               {reviewState === 'SHORT' && (
                 <>
                   <p className="text-amber-600 text-sm mb-4 font-medium">Your answer seems very short. Are you sure you want to send?</p>
@@ -607,7 +497,7 @@ export default function Interview({ candidate }) {
           {state === STATES.RECORDING && (
             <div className="flex flex-col items-center gap-4 w-full max-w-md">
               {/* FIX 1: Time Limit Display */}
-              {!silenceDetected && !isTimeLimitAutoSubmitting && (
+              {!isTimeLimitAutoSubmitting && (
                 <div className={`text-xl font-mono font-bold ${
                   recordingSeconds <= 5 ? 'text-red-500' :
                   recordingSeconds <= 10 ? 'text-amber-500' :
@@ -638,52 +528,18 @@ export default function Interview({ candidate }) {
                 </div>
               )}
 
-              {/* Silence detected — auto-submit overlay */}
-              {silenceDetected && !isTimeLimitAutoSubmitting && (
-                <div className="w-full p-4 bg-amber-50 border border-amber-200 rounded-xl text-center animate-[fadeIn_0.3s_ease-out]">
-                  <p className="text-amber-700 text-sm font-medium mb-1">
-                    Done answering?
-                  </p>
-                  <p className="text-amber-600 text-xs mb-3">
-                    Auto-submitting in <span className="font-bold text-lg text-amber-800">{autoSubmitCount}</span> seconds...
-                  </p>
-                  <div className="flex items-center justify-center gap-3">
-                    <button
-                      onClick={submitAnswer}
-                      disabled={isSubmitting}
-                      className="px-5 py-2 text-sm font-semibold text-white bg-[#00B050] rounded-lg hover:bg-emerald-600 transition-colors cursor-pointer disabled:opacity-50"
-                      id="submit-answer-btn"
-                    >
-                      ✓ Submit Now
-                    </button>
-                    <button
-                      onClick={() => {
-                        setSilenceDetected(false);
-                        setAutoSubmitCount(5);
-                        lastSpeechRef.current = Date.now();
-                        if (autoSubmitTimerRef.current) {
-                          clearInterval(autoSubmitTimerRef.current);
-                          autoSubmitTimerRef.current = null;
-                        }
-                      }}
-                      className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors cursor-pointer"
-                    >
-                      Keep Recording
-                    </button>
-                  </div>
-                </div>
-              )}
+
 
               {/* Mic Button with Pulse */}
               <button
                 onClick={submitAnswer}
                 disabled={isSubmitting}
                 className={`relative w-20 h-20 rounded-full flex items-center justify-center shadow-lg cursor-pointer group transition-all disabled:opacity-50 ${
-                  (silenceDetected || isTimeLimitAutoSubmitting) ? 'bg-amber-500' : 'bg-[#00B050]'
+                  isTimeLimitAutoSubmitting ? 'bg-amber-500' : 'bg-[#00B050]'
                 }`}
                 id="mic-button"
               >
-                {!(silenceDetected || isTimeLimitAutoSubmitting) && (
+                {!isTimeLimitAutoSubmitting && (
                   <div className="absolute inset-0 bg-[#00B050] rounded-full animate-ping opacity-30" />
                 )}
                 <svg className="w-8 h-8 text-white relative z-10" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -691,7 +547,7 @@ export default function Interview({ candidate }) {
                 </svg>
               </button>
 
-              <WaveformAnimation isActive={isListening && !silenceDetected} />
+              <WaveformAnimation isActive={isListening} />
 
               {/* Live Transcript */}
               <div className="w-full p-4 bg-gray-50 rounded-xl border border-gray-200 min-h-[80px]">
@@ -703,7 +559,7 @@ export default function Interview({ candidate }) {
               </div>
 
               {/* Manual done button — always visible */}
-              {!(silenceDetected || isTimeLimitAutoSubmitting) && (
+              {!isTimeLimitAutoSubmitting && (
                 <button
                   onClick={submitAnswer}
                   disabled={isSubmitting}
@@ -757,8 +613,8 @@ export default function Interview({ candidate }) {
             {state === STATES.AI_SPEAKING && 'Listen carefully...'}
             {state === STATES.COUNTDOWN && waitingForTTS && '🔊 AI is reading the question aloud...'}
             {state === STATES.COUNTDOWN && !waitingForTTS && countdownRunning && `Recording starts in ${count} seconds...`}
-            {state === STATES.RECORDING && !silenceDetected && 'Listening... speak clearly'}
-            {state === STATES.RECORDING && silenceDetected && `Auto-submitting in ${autoSubmitCount}s...`}
+            {state === STATES.RECORDING && !isTimeLimitAutoSubmitting && 'Listening... speak clearly'}
+            {state === STATES.RECORDING && isTimeLimitAutoSubmitting && `Submitting in ${autoSubmitCount}s...`}
             {state === STATES.PROCESSING && 'Processing your answer...'}
             {state === STATES.COMPLETE && 'Interview complete'}
           </p>
