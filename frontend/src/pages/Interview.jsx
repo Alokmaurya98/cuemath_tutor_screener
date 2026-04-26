@@ -21,8 +21,8 @@ export default function Interview({ candidate }) {
   const {
     liveTranscript, submittableTranscript, isListening,
     error: micError, isSupported, confidence,
-    finalTranscriptRef, isRecordingRef,
-    startListening, stopListening, resetTranscript
+    finalTranscriptRef, isRecordingRef, isSubmittingRef: micSubmittingRef,
+    startListening, stopListening, forceStop, resetTranscript
   } = useSpeechRecognition();
 
   const [reviewState, setReviewState] = useState(null);
@@ -58,11 +58,13 @@ export default function Interview({ candidate }) {
     setState(STATES.RECORDING);
     resetTranscript();
     finalTranscriptRef.current = '';
+    micSubmittingRef.current = false; // Reset submit gate for new recording
+    isRecordingRef.current = false; // Will be set true by startListening
     startListening();
     lastSpeechRef.current = Date.now();
     setSilenceDetected(false);
     setAutoSubmitCount(5);
-  }, [setState, resetTranscript, startListening, finalTranscriptRef]);
+  }, [setState, resetTranscript, startListening, finalTranscriptRef, micSubmittingRef, isRecordingRef]);
 
   const { count, isRunning: countdownRunning, start: startCountdown, skip: skipCountdown } =
     useCountdown(5, handleCountdownDone);
@@ -364,11 +366,15 @@ export default function Interview({ candidate }) {
 
   // ── Submit answer (manual or auto) ──
   const submitAnswer = useCallback((overrideTranscript = null) => {
-    // Clear all timers
+    // Clear all timers immediately
     clearInterval(silenceCheckRef.current);
     clearInterval(autoSubmitTimerRef.current);
     clearInterval(recordingTimerRef.current);
     clearInterval(timeLimitAutoSubmitTimerRef.current);
+    silenceCheckRef.current = null;
+    autoSubmitTimerRef.current = null;
+    recordingTimerRef.current = null;
+    timeLimitAutoSubmitTimerRef.current = null;
     setSilenceDetected(false);
     setIsTimeLimitAutoSubmitting(false);
 
@@ -378,11 +384,12 @@ export default function Interview({ candidate }) {
       return;
     }
 
-    // Stop recording — onend will fire and trigger handleSubmitTranscript via callback
-    stopListening(() => {
-      handleSubmitTranscript();
-    });
-  }, [stopListening, handleSubmitTranscript]);
+    // HARD STOP: Set submit gate FIRST so onend cannot restart recognition
+    forceStop();
+
+    // Now process the transcript directly — no callback, no race condition
+    handleSubmitTranscript();
+  }, [forceStop, handleSubmitTranscript]);
 
   // Keep the ref always pointing to the latest submitAnswer
   submitAnswerRef.current = submitAnswer;

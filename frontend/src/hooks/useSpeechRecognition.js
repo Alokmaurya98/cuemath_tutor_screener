@@ -12,6 +12,8 @@ export default function useSpeechRecognition() {
   const recognitionRef = useRef(null);
   // Ref-based recording flag — avoids stale closure issues with onend auto-restart
   const isRecordingRef = useRef(false);
+  // Hard gate — once true, onend will NEVER restart recognition
+  const isSubmittingRef = useRef(false);
   // Ref-based final transcript accumulator — avoids stale closure issues with onresult
   const finalTranscriptRef = useRef('');
   // Callback to invoke when recording intentionally stops (via stopListening)
@@ -35,6 +37,7 @@ export default function useSpeechRecognition() {
     setConfidence(1); // Reset confidence on new recording
     finalTranscriptRef.current = '';
     isRecordingRef.current = true;
+    isSubmittingRef.current = false; // Reset the submit gate for new recording
 
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
@@ -98,6 +101,13 @@ export default function useSpeechRecognition() {
     };
 
     recognition.onend = () => {
+      // HARD GATE: If we are submitting, do absolutely nothing — no restart, no callback
+      // The submit flow is handled directly by submitAnswer in Interview.jsx
+      if (isSubmittingRef.current) {
+        setIsListening(false);
+        return;
+      }
+
       // If we're still supposed to be recording, auto-restart (fixes Chrome auto-stop on silence)
       if (isRecordingRef.current) {
         try {
@@ -108,7 +118,7 @@ export default function useSpeechRecognition() {
           setIsListening(false);
         }
       } else {
-        // Recording was intentionally stopped
+        // Recording was intentionally stopped (not via submit — e.g. SILENCE timeout)
         setIsListening(false);
         // If a stop callback is registered, call it
         const cb = onStopCallbackRef.current;
@@ -156,6 +166,21 @@ export default function useSpeechRecognition() {
     }
   }, []);
 
+  // Force-stop: sets the submit gate so onend cannot restart, then stops recognition
+  const forceStop = useCallback(() => {
+    isRecordingRef.current = false;
+    isSubmittingRef.current = true;
+    onStopCallbackRef.current = null; // clear any pending callback
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        console.warn('Recognition force-stop failed:', e.message);
+      }
+    }
+    setIsListening(false);
+  }, []);
+
   const resetTranscript = useCallback(() => {
     setLiveTranscript('');
     setSubmittableTranscript('');
@@ -174,8 +199,10 @@ export default function useSpeechRecognition() {
     // Expose refs so Interview.jsx can read latest values without stale closures
     finalTranscriptRef,
     isRecordingRef,
+    isSubmittingRef,
     startListening,
     stopListening,
+    forceStop,
     resetTranscript
   };
 }
